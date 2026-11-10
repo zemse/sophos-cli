@@ -102,9 +102,7 @@ impl KeyProvider for SecretsProvider {
     fn unwrap(&self, payload: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProviderError> {
         let name = std::str::from_utf8(payload)
             .map_err(|_| ProviderError::Backend("secret name is not utf-8".into()))?;
-        let out = Command::new(Self::bin())
-            .args(["get", name])
-            .output()?;
+        let out = Command::new(Self::bin()).args(["get", name]).output()?;
         if !out.status.success() {
             return Err(ProviderError::Backend(format!(
                 "secrets get failed: {}",
@@ -126,7 +124,9 @@ fn to_hex(bytes: &[u8]) -> String {
 
 fn from_hex(s: &str) -> Result<Vec<u8>, ProviderError> {
     if s.len() % 2 != 0 {
-        return Err(ProviderError::Backend("stored seed has odd hex length".into()));
+        return Err(ProviderError::Backend(
+            "stored seed has odd hex length".into(),
+        ));
     }
     (0..s.len())
         .step_by(2)

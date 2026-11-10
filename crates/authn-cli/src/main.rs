@@ -11,10 +11,10 @@ use clap::{Parser, Subcommand};
 use totp_core::{decode_setup_key, generate, Algo, Envelope, KeyProvider, TotpParams};
 
 use provider_aws::AwsProvider;
-use provider_secrets::SecretsProvider;
-use provider_tpm::TpmProvider;
 #[cfg(target_os = "macos")]
 use provider_enclave::EnclaveProvider;
+use provider_secrets::SecretsProvider;
+use provider_tpm::TpmProvider;
 
 #[derive(Parser)]
 #[command(name = "authn", about = "Print a TOTP code from a machine-bound seed.")]
@@ -94,8 +94,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn cmd_code(store: &PathBuf) -> Result<(), Box<dyn Error>> {
-    let bytes = fs::read(store)
-        .map_err(|e| format!("cannot read {} ({e}); run `authn enroll` first", store.display()))?;
+    let bytes = fs::read(store).map_err(|e| {
+        format!(
+            "cannot read {} ({e}); run `authn enroll` first",
+            store.display()
+        )
+    })?;
     let env = Envelope::decode(&bytes)?;
     let provider = build_provider(&env.provider_id, "", provider_secrets::DEFAULT_ALLOW)
         .ok_or_else(|| format!("envelope names unknown backend `{}`", env.provider_id))?;
@@ -108,7 +112,11 @@ fn cmd_code(store: &PathBuf) -> Result<(), Box<dyn Error>> {
 fn cmd_providers() -> Result<(), Box<dyn Error>> {
     for id in auto_order() {
         if let Some(p) = build_provider(id, "totp/default", provider_secrets::DEFAULT_ALLOW) {
-            let mark = if p.available() { "available" } else { "unavailable" };
+            let mark = if p.available() {
+                "available"
+            } else {
+                "unavailable"
+            };
             println!("{id:10} {mark}");
         }
     }
@@ -147,7 +155,11 @@ fn cmd_enroll(
     }
     fs::write(store, env.encode()?)?;
     harden_perms(store);
-    eprintln!("enrolled via `{}` backend -> {}", chosen.id(), store.display());
+    eprintln!(
+        "enrolled via `{}` backend -> {}",
+        chosen.id(),
+        store.display()
+    );
     Ok(())
 }
 
