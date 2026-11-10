@@ -11,5 +11,3 @@ description = "KeyProvider backed by the macOS Secure Enclave (non-exportable P-
 totp-core.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
-# Secure Enclave deps (security-framework / core-foundation) are added by the
-# backend implementation.
