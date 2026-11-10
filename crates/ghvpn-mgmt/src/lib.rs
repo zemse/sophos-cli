@@ -188,7 +188,7 @@ pub fn static_challenge_response(password: &str, response: &str) -> String {
 /// Log-safe form of a command: keeps the verb and realm, hides the value.
 pub fn redacted(cmd: &str) -> String {
     match cmd.split_once(" \"Auth\" ") {
-        Some((verb, _)) if verb == "password" => "password \"Auth\" ********".to_string(),
+        Some(("password", _)) => "password \"Auth\" ********".to_string(),
         _ => cmd.to_string(),
     }
 }
