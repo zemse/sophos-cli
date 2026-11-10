@@ -1,0 +1,14 @@
+[package]
+name = "provider-aws"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "KeyProvider for EC2 without a TPM: AWS KMS envelope encryption / Secrets Manager via the instance IAM role."
+
+[dependencies]
+totp-core.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+# AWS SDK + async runtime deps are added by the backend implementation.

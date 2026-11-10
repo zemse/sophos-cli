@@ -1,0 +1,15 @@
+[package]
+name = "provider-enclave"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "KeyProvider backed by the macOS Secure Enclave (non-exportable P-256 key wrapping the seed)."
+
+[dependencies]
+totp-core.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+# Secure Enclave deps (security-framework / core-foundation) are added by the
+# backend implementation.

@@ -1,0 +1,24 @@
+[package]
+name = "authn-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Prints a TOTP code from a machine-bound seed. Backend-pluggable."
+
+[[bin]]
+name = "authn"
+path = "src/main.rs"
+
+[dependencies]
+totp-core.workspace = true
+zeroize.workspace = true
+provider-secrets = { path = "../provider-secrets" }
+provider-tpm = { path = "../provider-tpm" }
+provider-aws = { path = "../provider-aws" }
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+provider-enclave = { path = "../provider-enclave" }

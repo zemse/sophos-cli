@@ -1,0 +1,15 @@
+[package]
+name = "provider-tpm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "KeyProvider backed by a TPM 2.0 (incl. NitroTPM) via systemd-creds / tpm2-tools."
+
+[dependencies]
+totp-core.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+# TPM access is via shelling out to systemd-creds / tpm2-tools (pure std), so no
+# C-linked crate is pulled in and the crate still builds on non-Linux hosts.

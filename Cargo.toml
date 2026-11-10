@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/totp-core",
+    "crates/provider-secrets",
+    "crates/provider-enclave",
+    "crates/provider-tpm",
+    "crates/provider-aws",
+    "crates/authn-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Soham Zemse <soham@zemse.in>"]
+repository = "https://github.com/zemse/sophos-pin-oracle"
+
+[workspace.dependencies]
+totp-core = { path = "crates/totp-core" }
+zeroize = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
