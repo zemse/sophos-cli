@@ -11,4 +11,8 @@ description = "KeyProvider for EC2 without a TPM: AWS KMS envelope encryption / 
 totp-core.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
-# AWS SDK + async runtime deps are added by the backend implementation.
+# Default features of the aws-* crates use rustls (no native-tls / OpenSSL).
+aws-config = "1"
+aws-sdk-kms = "1"
+aws-sdk-secretsmanager = "1"
+tokio = { version = "1", features = ["rt"] }
