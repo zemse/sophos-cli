@@ -55,11 +55,17 @@ enum Cmd {
     },
     /// Import a single TOTP QR from a PNG or JPEG into the secrets backend.
     Import {
-        /// Image containing one otpauth TOTP QR code.
+        /// Image containing one TOTP provisioning or Google migration QR code.
         image: PathBuf,
         /// New secret entry name (existing names are refused).
+        #[arg(long, required_unless_present = "list", conflicts_with = "list")]
+        name: Option<String>,
+        /// List account names without storing or displaying seeds.
+        #[arg(long, conflicts_with = "account")]
+        list: bool,
+        /// Account number from --list (required for multi-account exports).
         #[arg(long)]
-        name: String,
+        account: Option<usize>,
         /// `secrets` allow setting (never = no prompt at runtime).
         #[arg(long, default_value = provider_secrets::DEFAULT_ALLOW)]
         allow: String,
@@ -83,7 +89,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     match cli.cmd {
         None | Some(Cmd::Code) => cmd_code(&store),
         Some(Cmd::Providers) => cmd_providers(),
-        Some(Cmd::Import { image, name, allow }) => import::run(&image, &store, &name, &allow),
+        Some(Cmd::Import {
+            image,
+            name,
+            list,
+            account,
+            allow,
+        }) => import::run(&image, &store, name.as_deref(), &allow, account, list),
         Some(Cmd::Enroll {
             provider,
             key,

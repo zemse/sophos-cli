@@ -11,6 +11,7 @@
 - [x] End-to-end enroll + code through the `enclave` backend on this Mac (zero interaction)
 - [x] Enroll + generate through `secrets` end to end on this Mac (QR import with public seed, SHA256/8 digits/60s cross-checked independently)
 - [x] Import a PNG/JPEG TOTP QR into `secrets` (parser + CLI tests, live roundtrip verified)
+- [x] Import Google Authenticator migration QRs with account listing and selection (parser + CLI tests, live selected-account roundtrip verified)
 - [ ] TPM: verify `systemd-creds` seal/unseal on EC2 (enable NitroTPM at launch, UEFI boot); confirm the stdin `--name` match behaviour and the tpm2-tools primary-recreation assumption
 - [ ] AWS: verify KMS Encrypt/Decrypt via instance role on EC2 (export AWS_REGION); confirm a copied binary off-instance fails to unwrap
 

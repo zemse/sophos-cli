@@ -64,11 +64,26 @@ authn --store /path/to/sophos.envelope
 
 Import reads one QR from a PNG or JPEG locally and stores the decoded seed in
 `secrets`. It never prints the setup key or passes it as a process argument.
-The image must contain a single `otpauth://totp/...` QR, not an HOTP or Google
-Authenticator migration QR. SHA1, SHA256 and SHA512, 6 or 8 digits, and periods
-from 1 to 65535 seconds are supported. Omitted parameters default to SHA1,
+The image must contain one `otpauth://totp/...` or Google Authenticator migration
+QR. SHA1, SHA256 and SHA512, 6 or 8 digits, and periods from 1 to 65535 seconds
+are supported. In standard TOTP URIs, omitted parameters default to SHA1,
 6 digits and 30 seconds. Duplicate TOTP parameters and invalid values are refused.
 Images are limited to 32 MiB, 8192 pixels per side and a 64 MiB decoder budget.
+
+For a Google Authenticator export, list the account names first, then select the
+1-based account number. Listing does not access `secrets` or create an envelope.
+
+```
+authn import /path/to/export.png --list
+authn import /path/to/export.png --account 2 --name totp/sophos --store /path/to/sophos.envelope
+```
+
+A single-account export needs no `--account`. Multi-account exports require an
+explicit selection; only that account is stored. Migration version 1 is supported
+with a single-QR batch. Multi-QR or incomplete exports are refused; export only
+the desired account in Google Authenticator instead. Migration data has no period
+field, so imported codes use 30 seconds. HOTP, MD5 and unknown or unspecified
+account parameters are unsupported and shown as such in `--list`.
 
 Existing envelope paths and existing secret names are refused. The name check is
 not atomic with `secrets set`, so do not import or write the same name concurrently.
@@ -79,6 +94,7 @@ the seed, so protect it like the original setup key. Import defaults to
 approval when reading codes. Enrollment may require a one-time approval.
 
 The URI parser follows the [Google Authenticator key URI format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format),
+migration decoding follows the [reconstructed Google export schema](https://github.com/qistoph/otp_export/blob/master/OtpMigration.proto),
 and image decoding uses [rqrr](https://github.com/WanzenBug/rqrr).
 
 The enrolled state lives in a self-describing envelope at

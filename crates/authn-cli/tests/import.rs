@@ -12,6 +12,22 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 // Public Google example seed, SHA256, 8 digits, 60-second period.
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/totp.png");
 const NAME: &str = "totp/import-test";
+const MIGRATION_SINGLE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/migration-single.png"
+);
+const MIGRATION_MULTIPLE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/migration-multiple.png"
+);
+const MIGRATION_HOTP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/migration-hotp.png"
+);
+const MIGRATION_BATCH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/migration-batch.png"
+);
 
 struct TestDir(PathBuf);
 
@@ -27,6 +43,7 @@ impl TestDir {
         fs::write(
             &bin,
             r#"#!/bin/sh
+printf '%s\n' "$1" >> "$TEST_DIR/calls"
 case "$1" in
     --version|status) exit 0 ;;
     list) if [ "$EXISTING" = yes ]; then printf '%s\n' 'totp/import-test'; fi ;;
@@ -75,6 +92,7 @@ fn assert_private_failure(output: Output) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("JBSWY3DPEHPK3PXP"));
     assert!(!stderr.contains("48656c6c6f21deadbeef"));
+    assert!(!stderr.contains("12345678901234567890"));
 }
 
 #[test]
@@ -111,6 +129,117 @@ fn image_import_and_code_through_secrets_protocol() {
     let code = String::from_utf8(code.stdout).unwrap();
     assert_eq!(code.trim().len(), 8);
     assert!(code.trim().bytes().all(|b| b.is_ascii_digit()));
+}
+
+#[test]
+fn migration_listing_is_read_only_and_excludes_seeds() {
+    let dir = TestDir::new();
+    let result = dir
+        .command()
+        .args(["import", MIGRATION_MULTIPLE, "--list"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        "1\tExample\tExample:alice\tTOTP\n2\tExample\tExample:bob\tTOTP\n"
+    );
+    assert!(result.stderr.is_empty());
+    assert!(!dir.0.join("calls").exists());
+    assert!(!dir.0.join("seed.envelope").exists());
+}
+
+#[test]
+fn migration_import_selects_exact_account_and_preserves_parameters() {
+    for (fixture, selection, seed, algo, digits) in [
+        (
+            MIGRATION_SINGLE,
+            None,
+            &b"12345678901234567890"[..],
+            Algo::Sha1,
+            6,
+        ),
+        (
+            MIGRATION_MULTIPLE,
+            Some("2"),
+            &b"12345678901234567890123456789012"[..],
+            Algo::Sha256,
+            8,
+        ),
+    ] {
+        let dir = TestDir::new();
+        let mut cmd = dir.import(Path::new(fixture));
+        if let Some(number) = selection {
+            cmd.args(["--account", number]);
+        }
+        let result = cmd.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stdout.is_empty());
+        let expected_hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            fs::read_to_string(dir.0.join("seed")).unwrap(),
+            expected_hex
+        );
+        assert_eq!(
+            fs::read_to_string(dir.0.join("args")).unwrap(),
+            "set totp/import-test --allow never\n"
+        );
+        let envelope = Envelope::decode(&fs::read(dir.0.join("seed.envelope")).unwrap()).unwrap();
+        assert_eq!(envelope.provider_id, "secrets");
+        assert_eq!(envelope.payload, NAME.as_bytes());
+        assert_eq!(envelope.params.algo, algo);
+        assert_eq!(envelope.params.digits, digits);
+        assert_eq!(envelope.params.step, 30);
+        let code = dir.command().arg("code").output().unwrap();
+        assert!(code.status.success());
+        assert_eq!(
+            String::from_utf8(code.stdout).unwrap().trim().len(),
+            usize::from(digits)
+        );
+    }
+}
+
+#[test]
+fn migration_rejects_ambiguous_unsupported_or_invalid_selection_before_storage() {
+    for (fixture, selection) in [
+        (MIGRATION_MULTIPLE, None),
+        (MIGRATION_MULTIPLE, Some("0")),
+        (MIGRATION_MULTIPLE, Some("3")),
+        (MIGRATION_HOTP, None),
+        (MIGRATION_BATCH, None),
+    ] {
+        let dir = TestDir::new();
+        let mut cmd = dir.import(Path::new(fixture));
+        if let Some(number) = selection {
+            cmd.args(["--account", number]);
+        }
+        assert_private_failure(cmd.output().unwrap());
+        assert!(!dir.0.join("calls").exists());
+        assert!(!dir.0.join("seed.envelope").exists());
+    }
+}
+
+#[test]
+fn migration_keeps_overwrite_guards() {
+    let dir = TestDir::new();
+    assert_private_failure(
+        dir.import(Path::new(MIGRATION_SINGLE))
+            .env("EXISTING", "yes")
+            .output()
+            .unwrap(),
+    );
+    assert!(!dir.0.join("args").exists());
+    fs::write(dir.0.join("seed.envelope"), b"existing enrollment").unwrap();
+    assert_private_failure(dir.import(Path::new(MIGRATION_SINGLE)).output().unwrap());
+    assert_eq!(
+        fs::read(dir.0.join("seed.envelope")).unwrap(),
+        b"existing enrollment"
+    );
+    assert!(!dir.0.join("args").exists());
 }
 
 #[test]

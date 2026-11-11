@@ -1,4 +1,6 @@
-//! Import a single TOTP provisioning QR without displaying its contents.
+//! Import TOTP provisioning and migration QRs without displaying seeds.
+
+mod migration;
 
 use std::error::Error;
 use std::fs::{self, OpenOptions};
@@ -16,14 +18,46 @@ struct Provisioning {
     params: TotpParams,
 }
 
-pub fn run(image: &Path, store: &Path, name: &str, allow: &str) -> Result<(), Box<dyn Error>> {
+struct Account {
+    label: String,
+    issuer: String,
+    provisioning: Result<Provisioning, &'static str>,
+}
+
+pub fn run(
+    image: &Path,
+    store: &Path,
+    name: Option<&str>,
+    allow: &str,
+    account: Option<usize>,
+    list: bool,
+) -> Result<(), Box<dyn Error>> {
+    let content = read_qr(image)?;
+    let accounts = parse_accounts(&content)?;
+    if list {
+        for (index, account) in accounts.iter().enumerate() {
+            let status = match &account.provisioning {
+                Ok(_) => "TOTP",
+                Err(reason) => reason,
+            };
+            println!(
+                "{}\t{}\t{}\t{}",
+                index + 1,
+                account.issuer.escape_debug(),
+                account.label.escape_debug(),
+                status
+            );
+        }
+        return Ok(());
+    }
+    let provisioning = select_account(accounts, account)?;
+    let name = name.ok_or("--name is required for import")?;
     if name.is_empty() || name.starts_with('-') || name.chars().any(char::is_control) {
         return Err(
             "secret name must be nonempty, not start with '-' and contain no control characters"
                 .into(),
         );
     }
-    let provisioning = read_qr(image)?;
     let provider = SecretsProvider::new(name).with_allow(allow);
     if !provider.available() {
         return Err("secrets backend is not available on this host".into());
@@ -63,7 +97,44 @@ pub fn run(image: &Path, store: &Path, name: &str, allow: &str) -> Result<(), Bo
     Ok(())
 }
 
-fn read_qr(path: &Path) -> Result<Provisioning, Box<dyn Error>> {
+fn select_account(
+    accounts: Vec<Account>,
+    number: Option<usize>,
+) -> Result<Provisioning, Box<dyn Error>> {
+    let number = match number {
+        Some(number) => number,
+        None if accounts.len() == 1 => 1,
+        None => {
+            return Err(
+                "multiple accounts in QR; use --list, then select with --account NUMBER".into(),
+            )
+        }
+    };
+    let index = number.checked_sub(1).ok_or("account numbers start at 1")?;
+    let account = accounts
+        .into_iter()
+        .nth(index)
+        .ok_or("account number is out of range")?;
+    account.provisioning.map_err(Into::into)
+}
+
+fn parse_accounts(content: &str) -> Result<Vec<Account>, Box<dyn Error>> {
+    if content.len() > 16384 || content.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("invalid authenticator URI".into());
+    }
+    let uri = Url::parse(content).map_err(|_| "invalid authenticator URI")?;
+    if uri.scheme() == "otpauth-migration" {
+        return migration::parse(&uri);
+    }
+    let provisioning = parse_uri(content)?;
+    Ok(vec![Account {
+        label: uri.path().trim_start_matches('/').to_owned(),
+        issuer: String::new(),
+        provisioning: Ok(provisioning),
+    }])
+}
+
+fn read_qr(path: &Path) -> Result<Zeroizing<String>, Box<dyn Error>> {
     if fs::metadata(path)?.len() > 32 * 1024 * 1024 {
         return Err("QR image exceeds the 32 MiB file limit".into());
     }
@@ -86,8 +157,7 @@ fn read_qr(path: &Path) -> Result<Provisioning, Box<dyn Error>> {
         return Err("expected exactly one QR code in the image".into());
     }
     let (_, content) = grids[0].decode().map_err(|_| "cannot decode QR code")?;
-    let content = Zeroizing::new(content);
-    parse_uri(&content)
+    Ok(Zeroizing::new(content))
 }
 
 fn parse_uri(content: &str) -> Result<Provisioning, Box<dyn Error>> {
@@ -104,7 +174,8 @@ fn parse_uri(content: &str) -> Result<Provisioning, Box<dyn Error>> {
         || uri.path().trim_matches('/').is_empty()
     {
         return Err(
-            "expected an otpauth://totp/label URI (HOTP and migration QRs are unsupported)".into(),
+            "expected an otpauth TOTP or Google Authenticator migration URI (HOTP is unsupported)"
+                .into(),
         );
     }
     let mut secret = None;
