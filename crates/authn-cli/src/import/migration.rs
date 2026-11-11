@@ -1,4 +1,4 @@
-//! Google Authenticator's version 1 migration protobuf format.
+//! Google Authenticator's version 1 and 2 migration protobuf format.
 
 use std::error::Error;
 
@@ -81,8 +81,8 @@ pub(super) fn parse(uri: &Url) -> Result<Vec<Account>, Box<dyn Error>> {
     let bytes = Zeroizing::new(bytes);
     let payload = MigrationPayload::decode(bytes.as_slice())
         .map_err(|_| "invalid migration protobuf data")?;
-    if payload.version != Some(1) {
-        return Err("unsupported migration version (expected version 1)".into());
+    if !matches!(payload.version, Some(1 | 2)) {
+        return Err("unsupported migration version (expected version 1 or 2)".into());
     }
     if payload.batch_size != Some(1) || payload.batch_index.unwrap_or(0) != 0 {
         return Err("multi-QR or incomplete exports are unsupported; export only the desired account in Google Authenticator".into());
@@ -174,6 +174,16 @@ mod tests {
     }
 
     #[test]
+    fn version_two_preserves_seed_and_parameters() {
+        let content = include_str!("../../tests/fixtures/migration-v2.txt");
+        let p = select_account(parse_accounts(content.trim()).unwrap(), None).unwrap();
+        assert_eq!(&*p.seed, b"12345678901234567890");
+        assert_eq!(p.params.algo, Algo::Sha1);
+        assert_eq!(p.params.digits, 6);
+        assert_eq!(p.params.step, 30);
+    }
+
+    #[test]
     fn multi_account_requires_selection_and_preserves_second_account() {
         assert!(select_account(parse_accounts(MULTIPLE.trim()).unwrap(), None).is_err());
         for invalid in [0, 3, usize::MAX] {
@@ -193,7 +203,7 @@ mod tests {
         assert!(select_account(parse_accounts(HOTP.trim()).unwrap(), None).is_err());
         assert!(parse_accounts(BATCH.trim()).is_err());
         let mut payload = fixture_payload();
-        payload.version = Some(2);
+        payload.version = Some(3);
         assert!(parse_accounts(&uri(&payload)).is_err());
         payload.version = None;
         assert!(parse_accounts(&uri(&payload)).is_err());

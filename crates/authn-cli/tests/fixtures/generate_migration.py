@@ -38,9 +38,9 @@ def account(name, secret, algorithm=1, digits=1, kind=2):
     ])
 
 
-def payload(accounts, batch_size=1):
+def payload(accounts, batch_size=1, version=1):
     return b"".join(blob(1, item) for item in accounts) + b"".join([
-        integer(2, 1),
+        integer(2, version),
         integer(3, batch_size),
         integer(4, 0),
         integer(5, 42),
@@ -55,6 +55,7 @@ def main():
     hotp = account("Example:counter", b"12345678901234567890", kind=1)
     cases = {
         "migration-single": payload([alice]),
+        "migration-v2": payload([alice], version=2),
         "migration-multiple": payload([alice, bob]),
         "migration-hotp": payload([hotp]),
         "migration-batch": payload([alice], batch_size=2),
@@ -65,7 +66,7 @@ def main():
         subprocess.run([qrrs, uri, str(ROOT / (name + ".png"))], check=True)
         decoded = subprocess.check_output([qrrs, "--read", str(ROOT / (name + ".png"))], text=True)
         assert decoded.strip() == uri, "fixture QR roundtrip mismatch"
-    print("Verified four public migration QR fixtures")
+    print(f"Verified {len(cases)} public migration QR fixtures")
 
 
 if __name__ == "__main__":

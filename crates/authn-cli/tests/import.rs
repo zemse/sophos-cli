@@ -16,6 +16,10 @@ const MIGRATION_SINGLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/migration-single.png"
 );
+const MIGRATION_V2: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/migration-v2.png"
+);
 const MIGRATION_MULTIPLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/migration-multiple.png"
@@ -154,6 +158,13 @@ fn migration_import_selects_exact_account_and_preserves_parameters() {
     for (fixture, selection, seed, algo, digits) in [
         (
             MIGRATION_SINGLE,
+            None,
+            &b"12345678901234567890"[..],
+            Algo::Sha1,
+            6,
+        ),
+        (
+            MIGRATION_V2,
             None,
             &b"12345678901234567890"[..],
             Algo::Sha1,

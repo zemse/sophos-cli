@@ -79,9 +79,9 @@ authn import /path/to/export.png --account 2 --name totp/sophos --store /path/to
 ```
 
 A single-account export needs no `--account`. Multi-account exports require an
-explicit selection; only that account is stored. Migration version 1 is supported
-with a single-QR batch. Multi-QR or incomplete exports are refused; export only
-the desired account in Google Authenticator instead. Migration data has no period
+explicit selection; only that account is stored. Migration versions 1 and 2 are
+supported with a single-QR batch. Multi-QR or incomplete exports are refused;
+export only the desired account in Google Authenticator instead. Migration data has no period
 field, so imported codes use 30 seconds. HOTP, MD5 and unknown or unspecified
 account parameters are unsupported and shown as such in `--list`.
 
