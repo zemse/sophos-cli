@@ -173,8 +173,12 @@ async fn run_inner(
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
     // The prompt has no newline; writing the password straight away is fine.
-    wr.write_all(format!("{mgmt_pw}\nstate on\nbytecount 2\nhold release\n").as_bytes())
-        .await?;
+    wr.write_all(format!("{mgmt_pw}\n").as_bytes()).await?;
+    log("waiting for OpenVPN startup hold".into()).await?;
+    if let Err(e) = release_startup_hold(&mut lines, &mut wr, ev, Duration::from_secs(10)).await {
+        shutdown(&mut child, &pid_file, p.use_sudo, ev).await;
+        return Err(e);
+    }
 
     let mut disconnecting = false;
     loop {
@@ -212,6 +216,42 @@ async fn run_inner(
             }
         }
     }
+}
+
+async fn release_startup_hold<R, W>(
+    lines: &mut tokio::io::Lines<R>,
+    wr: &mut W,
+    ev: &mpsc::Sender<AppEvent>,
+    timeout: Duration,
+) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    tokio::time::timeout(timeout, async {
+        let mut authenticated = false;
+        let mut held = false;
+        while let Some(line) = lines.next_line().await? {
+            match ghvpn_mgmt::parse_line(&line) {
+                Line::Success(s) if s == "password is correct" => authenticated = true,
+                Line::Notification(Notification::Hold(_)) => held = true,
+                Line::Error(s) | Line::Notification(Notification::Fatal(s)) => {
+                    bail!("OpenVPN management startup failed: {s}");
+                }
+                _ => {}
+            }
+            handle_line(&line, ev).await;
+            if authenticated && held {
+                // Releasing before >HOLD can succeed without releasing the later hold.
+                wr.write_all(b"state on\nbytecount 2\nhold release\n")
+                    .await?;
+                return Ok(());
+            }
+        }
+        bail!("OpenVPN management interface closed before startup hold");
+    })
+    .await
+    .context("timed out waiting for OpenVPN management authentication and startup hold")?
 }
 
 async fn handle_line(line: &str, ev: &mpsc::Sender<AppEvent>) {
@@ -341,6 +381,138 @@ fn free_port() -> anyhow::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Requires Linux with OpenVPN and ca-certificates; never sends VPN credentials.
+    #[tokio::test]
+    #[ignore]
+    async fn startup_with_real_openvpn() -> anyhow::Result<()> {
+        let dir = make_run_dir()?;
+        let password = random_hex(16)?;
+        let pw_file = dir.0.join("mgmt.pw");
+        write_private(&pw_file, format!("{password}\n").as_bytes())?;
+        let port = free_port()?;
+        let mut child = Command::new("openvpn")
+            .args([
+                "--client",
+                "--dev",
+                "null",
+                "--proto",
+                "tcp-client",
+                "--remote",
+                "127.0.0.1",
+                "9",
+                "--ca",
+                "/etc/ssl/certs/ISRG_Root_X1.pem",
+                "--auth-user-pass",
+                "--management",
+                "127.0.0.1",
+            ])
+            .arg(port.to_string())
+            .arg(&pw_file)
+            .args(["--management-hold", "--management-query-passwords"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let stream = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(status) = child.try_wait()? {
+                    bail!("test OpenVPN exited: {status}");
+                }
+                if let Ok(stream) = TcpStream::connect(("127.0.0.1", port)).await {
+                    return anyhow::Ok(stream);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        let (rd, mut wr) = stream.into_split();
+        let mut lines = BufReader::new(rd).lines();
+        let (ev, _rx) = mpsc::channel(32);
+        wr.write_all(format!("{password}\n").as_bytes()).await?;
+        release_startup_hold(&mut lines, &mut wr, &ev, Duration::from_secs(5)).await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = lines.next_line().await? {
+                if matches!(
+                    ghvpn_mgmt::parse_line(&line),
+                    Line::Notification(Notification::NeedAuth { .. })
+                ) {
+                    return anyhow::Ok(());
+                }
+            }
+            bail!("OpenVPN closed without requesting credentials");
+        })
+        .await??;
+        child.kill().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_waits_for_hold_before_sending_commands() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (rd, mut wr) = tokio::io::split(client);
+        let mut lines = BufReader::new(rd).lines();
+        let (ev, _rx) = mpsc::channel(16);
+        let server = tokio::spawn(async move {
+            let (rd, mut wr) = tokio::io::split(server);
+            let mut lines = BufReader::new(rd).lines();
+            wr.write_all(b"ENTER PASSWORD:SUCCESS: password is correct\r\n>INFO:ready\r\n")
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), lines.next_line())
+                    .await
+                    .is_err()
+            );
+            wr.write_all(b">HOLD:Waiting for hold release:0\r\n")
+                .await
+                .unwrap();
+            for expected in ["state on", "bytecount 2", "hold release"] {
+                assert_eq!(lines.next_line().await.unwrap().as_deref(), Some(expected));
+            }
+        });
+        release_startup_hold(&mut lines, &mut wr, &ev, Duration::from_secs(2))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_reports_management_errors_and_early_close() {
+        for (message, expected) in [
+            ("ERROR: bad management password\n", "startup failed"),
+            (">FATAL:startup failed\n", "startup failed"),
+            ("", "closed before startup hold"),
+        ] {
+            let (client, mut server) = tokio::io::duplex(4096);
+            server.write_all(message.as_bytes()).await.unwrap();
+            server.shutdown().await.unwrap();
+            let (rd, mut wr) = tokio::io::split(client);
+            let mut lines = BufReader::new(rd).lines();
+            let (ev, _rx) = mpsc::channel(16);
+            let err = release_startup_hold(&mut lines, &mut wr, &ev, Duration::from_secs(2))
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains(expected), "{err:#}");
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_times_out_if_hold_never_arrives() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        server
+            .write_all(b"SUCCESS: password is correct\n")
+            .await
+            .unwrap();
+        let (rd, mut wr) = tokio::io::split(client);
+        let mut lines = BufReader::new(rd).lines();
+        let (ev, _rx) = mpsc::channel(16);
+        let err = release_startup_hold(&mut lines, &mut wr, &ev, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err:#}");
+    }
 
     #[test]
     fn redacts_auth_token() {
