@@ -38,6 +38,17 @@ impl SecretsProvider {
         self
     }
 
+    /// Check for an existing name without retrieving any secret values.
+    pub fn exists(&self) -> Result<bool, ProviderError> {
+        let out = Command::new(Self::bin()).arg("list").output()?;
+        if !out.status.success() {
+            return Err(ProviderError::Backend("secrets list failed".into()));
+        }
+        let names = std::str::from_utf8(&out.stdout)
+            .map_err(|_| ProviderError::Backend("secret names are not utf-8".into()))?;
+        Ok(names.lines().any(|name| name == self.name))
+    }
+
     /// Resolve the `secrets` binary: PATH first, then the standard install path.
     fn bin() -> String {
         if Command::new("secrets")

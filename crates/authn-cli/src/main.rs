@@ -7,6 +7,8 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod import;
+
 use clap::{Parser, Subcommand};
 use totp_core::{decode_setup_key, generate, Algo, Envelope, KeyProvider, TotpParams};
 
@@ -51,6 +53,17 @@ enum Cmd {
         #[arg(long, default_value = "sha1")]
         algo: String,
     },
+    /// Import a single TOTP QR from a PNG or JPEG into the secrets backend.
+    Import {
+        /// Image containing one otpauth TOTP QR code.
+        image: PathBuf,
+        /// New secret entry name (existing names are refused).
+        #[arg(long)]
+        name: String,
+        /// `secrets` allow setting (never = no prompt at runtime).
+        #[arg(long, default_value = provider_secrets::DEFAULT_ALLOW)]
+        allow: String,
+    },
     /// Print the current code (default when no subcommand is given).
     Code,
     /// List compiled backends and whether each is available on this host.
@@ -70,6 +83,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     match cli.cmd {
         None | Some(Cmd::Code) => cmd_code(&store),
         Some(Cmd::Providers) => cmd_providers(),
+        Some(Cmd::Import { image, name, allow }) => import::run(&image, &store, &name, &allow),
         Some(Cmd::Enroll {
             provider,
             key,
