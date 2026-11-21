@@ -1,5 +1,18 @@
 # Tasks
 
+## Onboarding (sophos)
+- [x] `sophos totp import` from QR image, otpauth URI or base32 key, file or stdin, into any backend (unit + CLI tests; live enclave import over stdin cross-checked against an independent HMAC)
+- [x] `sophos setup` writes and validates config.json (unit test + live run on this Mac)
+- [x] Manual OTP mode: `needs_otp` state, `sophos connect`/`sophos otp` codes, 60 s expiry (engine tests with a fake management socket)
+- [x] Envelope source in the daemon, unwrapped per login, falling back to `needs_otp` on backend failure (engine test with a `plain` envelope)
+- [ ] Live: `sophos profile fetch` against a real SFOS portal (login status codes, OTP consumption)
+- [ ] Live: root daemon unwrapping an `enclave` envelope, including at boot before any user login (key is `WhenUnlockedThisDeviceOnly`)
+- [ ] Live: manual mode across a firewall-initiated TLS renegotiation (does Sophos push `auth-token`, what is its reneg-sec)
+- [ ] Live: systemd unit and launchd plist with `--system` config, TPM unseal under the unit's sandboxing
+- [ ] `aws` backend: record the mode (KMS context or secret) in the envelope so unwrap does not need env vars in the service
+- [ ] Persist the last used TOTP counter so a daemon restart, or `profile fetch` just before it, cannot reuse a code
+- [ ] `sophos service install` to write and enable the unit or plist
+
 ## VPN
 - [ ] First live run against 203.0.113.10 with real VPN + GitHub credentials (portal login status codes, OpenVPN port/proto, P4 VPN→WAN SNAT)
 - [ ] Find the portal hostname on the `*.example.com` cert and make it the `--portal-host` default

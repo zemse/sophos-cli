@@ -117,7 +117,7 @@ enum TotpCommand {
         /// PNG/JPEG QR (Google Authenticator export or provisioning QR), text file, or `-`.
         source: PathBuf,
         /// Backend: auto, enclave, secrets, tpm, aws or plain.
-        #[arg(long, default_value = "auto")]
+        #[arg(long, default_value = DEFAULT_PROVIDER)]
         provider: String,
         /// Entry name for the `secrets` backend.
         #[arg(long, default_value = "sophos-cli/totp")]
@@ -137,6 +137,12 @@ enum TotpCommand {
     /// List TOTP backends and whether each is available on this host.
     Providers,
 }
+
+/// The daemon runs as root, where the per-user `secrets` store that `auto` prefers on macOS is not reachable.
+#[cfg(target_os = "macos")]
+const DEFAULT_PROVIDER: &str = "enclave";
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_PROVIDER: &str = "auto";
 
 struct RawMode;
 impl Drop for RawMode {
