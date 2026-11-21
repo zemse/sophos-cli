@@ -79,7 +79,9 @@ esac
 
     fn import(&self, image: &Path) -> Command {
         let mut cmd = self.command();
-        cmd.arg("import").arg(image).args(["--name", NAME]);
+        cmd.arg("import")
+            .arg(image)
+            .args(["--provider", "secrets", "--name", NAME]);
         cmd
     }
 }
@@ -339,4 +341,45 @@ fn rejects_missing_corrupt_blank_and_multiple_qr_images() {
     assert_private_failure(dir.import(&path).output().unwrap());
     assert!(!dir.0.join("args").exists());
     assert!(!dir.0.join("seed.envelope").exists());
+}
+
+#[test]
+fn stdin_uri_import_into_plain_backend_generates_codes() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let dir = TestDir::new();
+    let mut child = dir
+        .command()
+        .args(["import", "-", "--provider", "plain"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&digits=8\n")
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let store = dir.0.join("seed.envelope");
+    let envelope = Envelope::decode(&fs::read(&store).unwrap()).unwrap();
+    assert_eq!(envelope.provider_id, "plain");
+    assert_eq!(envelope.params.digits, 8);
+    assert!(!dir.0.join("args").exists());
+    let code = dir.command().arg("code").output().unwrap();
+    assert!(code.status.success());
+    assert_eq!(String::from_utf8(code.stdout).unwrap().trim().len(), 8);
+    let again = dir
+        .command()
+        .args(["import", FIXTURE, "--provider", "plain"])
+        .output()
+        .unwrap();
+    assert_private_failure(again);
 }

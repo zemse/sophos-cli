@@ -1,7 +1,5 @@
 //! Google Authenticator's version 1 and 2 migration protobuf format.
 
-use std::error::Error;
-
 use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
     Engine as _,
@@ -52,7 +50,7 @@ impl Drop for OtpParameters {
     }
 }
 
-pub(super) fn parse(uri: &Url) -> Result<Vec<Account>, Box<dyn Error>> {
+pub(super) fn parse(uri: &Url) -> Result<Vec<Account>, crate::Error> {
     if uri.host_str() != Some("offline")
         || !uri.username().is_empty()
         || uri.password().is_some()

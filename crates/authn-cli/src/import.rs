@@ -1,17 +1,21 @@
-//! Import TOTP provisioning and migration QRs without displaying seeds.
+//! Import TOTP provisioning and migration QRs, otpauth URIs and base32 setup
+//! keys without displaying seeds.
 
 mod migration;
 
-use std::error::Error;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{Cursor, Read};
 use std::path::Path;
 
 use image::{ImageFormat, ImageReader, Limits};
 use provider_secrets::SecretsProvider;
-use totp_core::{decode_setup_key, Algo, Envelope, KeyProvider, TotpParams};
+use totp_core::{decode_setup_key, Algo, TotpParams};
 use url::Url;
 use zeroize::Zeroizing;
+
+use crate::Error;
+
+const INPUT_LIMIT: u64 = 32 * 1024 * 1024;
 
 struct Provisioning {
     seed: Zeroizing<Vec<u8>>,
@@ -24,17 +28,22 @@ struct Account {
     provisioning: Result<Provisioning, &'static str>,
 }
 
-pub fn run(
-    image: &Path,
-    store: &Path,
-    name: Option<&str>,
-    allow: &str,
-    account: Option<usize>,
-    list: bool,
-) -> Result<(), Box<dyn Error>> {
-    let content = read_qr(image)?;
+pub struct Options<'a> {
+    /// Backend id or `auto`.
+    pub provider: &'a str,
+    /// Entry name, required by the `secrets` backend only.
+    pub name: Option<&'a str>,
+    pub allow: &'a str,
+    pub account: Option<usize>,
+    pub list: bool,
+}
+
+/// Import from `source`: a PNG/JPEG QR, an otpauth URI or a base32 key, read
+/// from a file or from stdin when `source` is `-`.
+pub fn run(source: &Path, store: &Path, options: &Options) -> Result<(), Error> {
+    let content = read_source(source)?;
     let accounts = parse_accounts(&content)?;
-    if list {
+    if options.list {
         for (index, account) in accounts.iter().enumerate() {
             let status = match &account.provisioning {
                 Ok(_) => "TOTP",
@@ -50,57 +59,48 @@ pub fn run(
         }
         return Ok(());
     }
-    let provisioning = select_account(accounts, account)?;
-    let name = name.ok_or("--name is required for import")?;
-    if name.is_empty() || name.starts_with('-') || name.chars().any(char::is_control) {
-        return Err(
-            "secret name must be nonempty, not start with '-' and contain no control characters"
-                .into(),
-        );
+    let provisioning = select_account(accounts, options.account)?;
+    if let Some(name) = options.name {
+        if name.is_empty() || name.starts_with('-') || name.chars().any(char::is_control) {
+            return Err(
+                "secret name must be nonempty, not start with '-' and contain no control characters"
+                    .into(),
+            );
+        }
     }
-    let provider = SecretsProvider::new(name).with_allow(allow);
-    if !provider.available() {
-        return Err("secrets backend is not available on this host".into());
+    let provider = crate::choose_provider(
+        options.provider,
+        options.name.unwrap_or_default(),
+        options.allow,
+    )?;
+    let secrets = provider.id() == "secrets";
+    if secrets {
+        let name = options
+            .name
+            .ok_or("--name is required for the secrets backend")?;
+        if SecretsProvider::new(name).exists()? {
+            return Err("secret name already exists; choose a new --name".into());
+        }
     }
-    if provider.exists()? {
-        return Err("secret name already exists; choose a new --name".into());
-    }
-    if let Some(parent) = store.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(store).map_err(|_| {
-        "cannot create envelope; choose a new --store path and check directory permissions"
-    })?;
-    let result = (|| -> Result<(), Box<dyn Error>> {
-        let payload = provider
-            .wrap(&provisioning.seed)
-            .map_err(|_| "secrets enrollment failed")?;
-        let envelope = Envelope::new(provider.id(), provisioning.params, payload);
-        file.write_all(&envelope.encode()?)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        drop(file);
-        let _ = fs::remove_file(store);
+    let result = crate::write_envelope(
+        store,
+        provider.as_ref(),
+        &provisioning.seed,
+        provisioning.params,
+    );
+    if result.is_err() && secrets {
         eprintln!("import failed; a secret entry may remain under the requested name");
     }
     result?;
-    eprintln!("imported via `secrets` backend -> {}", store.display());
+    eprintln!(
+        "imported via `{}` backend -> {}",
+        provider.id(),
+        store.display()
+    );
     Ok(())
 }
 
-fn select_account(
-    accounts: Vec<Account>,
-    number: Option<usize>,
-) -> Result<Provisioning, Box<dyn Error>> {
+fn select_account(accounts: Vec<Account>, number: Option<usize>) -> Result<Provisioning, Error> {
     let number = match number {
         Some(number) => number,
         None if accounts.len() == 1 => 1,
@@ -118,7 +118,28 @@ fn select_account(
     account.provisioning.map_err(Into::into)
 }
 
-fn parse_accounts(content: &str) -> Result<Vec<Account>, Box<dyn Error>> {
+fn parse_accounts(content: &str) -> Result<Vec<Account>, Error> {
+    if !content.contains(':') {
+        let key: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+        if !key
+            .bytes()
+            .all(|b| b.is_ascii_alphabetic() || (b'2'..=b'7').contains(&b) || b == b'=')
+        {
+            return Err("input is not a QR image, otpauth URI or base32 setup key".into());
+        }
+        let seed = decode_setup_key(&key)?;
+        if seed.len() < 10 {
+            return Err("setup key must contain at least 80 bits (16 base32 characters)".into());
+        }
+        return Ok(vec![Account {
+            label: "setup key".into(),
+            issuer: String::new(),
+            provisioning: Ok(Provisioning {
+                seed,
+                params: TotpParams::default(),
+            }),
+        }]);
+    }
     if content.len() > 16384 || content.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("invalid authenticator URI".into());
     }
@@ -134,11 +155,38 @@ fn parse_accounts(content: &str) -> Result<Vec<Account>, Box<dyn Error>> {
     }])
 }
 
-fn read_qr(path: &Path) -> Result<Zeroizing<String>, Box<dyn Error>> {
-    if fs::metadata(path)?.len() > 32 * 1024 * 1024 {
-        return Err("QR image exceeds the 32 MiB file limit".into());
+fn read_source(path: &Path) -> Result<Zeroizing<String>, Error> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    if path == Path::new("-") {
+        std::io::stdin()
+            .lock()
+            .take(INPUT_LIMIT + 1)
+            .read_to_end(&mut bytes)?;
+    } else {
+        if fs::metadata(path)?.len() > INPUT_LIMIT {
+            return Err("input exceeds the 32 MiB limit".into());
+        }
+        File::open(path)?
+            .take(INPUT_LIMIT + 1)
+            .read_to_end(&mut bytes)?;
     }
-    let mut reader = ImageReader::open(path)?.with_guessed_format()?;
+    if bytes.len() as u64 > INPUT_LIMIT {
+        return Err("input exceeds the 32 MiB limit".into());
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return read_qr(&bytes);
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "input must be a PNG or JPEG QR, an otpauth URI or a base32 setup key")?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("input is empty".into());
+    }
+    Ok(Zeroizing::new(text.to_owned()))
+}
+
+fn read_qr(bytes: &[u8]) -> Result<Zeroizing<String>, Error> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     if !matches!(reader.format(), Some(ImageFormat::Png | ImageFormat::Jpeg)) {
         return Err("QR image must be PNG or JPEG".into());
     }
@@ -160,7 +208,7 @@ fn read_qr(path: &Path) -> Result<Zeroizing<String>, Box<dyn Error>> {
     Ok(Zeroizing::new(content))
 }
 
-fn parse_uri(content: &str) -> Result<Provisioning, Box<dyn Error>> {
+fn parse_uri(content: &str) -> Result<Provisioning, Error> {
     if content.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("invalid authenticator URI".into());
     }
@@ -301,6 +349,17 @@ mod tests {
                 parse_uri(&format!("{URI}{suffix}")).is_err(),
                 "accepted malformed fixture"
             );
+        }
+    }
+
+    #[test]
+    fn accepts_base32_setup_keys_and_rejects_short_or_arbitrary_text() {
+        let accounts = parse_accounts("jbsw y3dp ehpk 3pxp").unwrap();
+        let p = accounts.into_iter().next().unwrap().provisioning.unwrap();
+        assert_eq!(&*p.seed, b"Hello!\xde\xad\xbe\xef");
+        assert_eq!(p.params.digits, 6);
+        for text in ["not an image", "JBSWY3DP", "JBSWY3DPEHPK3PX1"] {
+            assert!(parse_accounts(text).is_err());
         }
     }
 
