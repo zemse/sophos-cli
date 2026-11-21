@@ -2,12 +2,12 @@
 //! whether a GitHub repository is reachable through it.
 
 mod app;
-mod ovpn;
 mod portal;
 mod probe;
-mod routes;
 mod ui;
 mod vpn;
+
+use sophos_cli::{ovpn, routes};
 
 use anyhow::Context;
 use clap::Parser;

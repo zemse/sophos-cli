@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 ghvpn-mgmt = { path = "../ghvpn-mgmt" }
+sophos-cli = { path = "../sophos-cli" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
