@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>in.soham.sophos</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/sophos</string>
+        <string>--config</string>
+        <string>/Library/Application Support/sophos-cli/config.json</string>
+        <string>daemon</string>
+    </array>
+    <key>UserName</key>
+    <string>root</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>SoftResourceLimits</key>
+    <dict><key>Core</key><integer>0</integer></dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/sophos-cli.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/sophos-cli.log</string>
+</dict>
+</plist>

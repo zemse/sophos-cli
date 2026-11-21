@@ -7,6 +7,9 @@ members = [
     "crates/provider-tpm",
     "crates/provider-aws",
     "crates/authn-cli",
+    "crates/ghvpn-mgmt",
+    "crates/ghvpn-tui",
+    "crates/sophos-cli",
 ]
 
 [workspace.package]
@@ -14,7 +17,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Soham Zemse <soham@zemse.in>"]
-repository = "https://github.com/zemse/sophos-pin-oracle"
+repository = "https://github.com/zemse/sophos-cli"
 
 [workspace.dependencies]
 totp-core = { path = "crates/totp-core" }

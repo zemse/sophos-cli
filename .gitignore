@@ -1,2 +1,5 @@
 /target
 *.envelope
+*.ovpn
+/clones
+/.bhai

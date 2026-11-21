@@ -1,0 +1,18 @@
+[package]
+name = "ghvpn-tui"
+description = "TUI harness: connect to a Sophos SSL VPN with openvpn and probe GitHub access through it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+ghvpn-mgmt = { path = "../ghvpn-mgmt" }
+sophos-cli = { path = "../sophos-cli" }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+libc = "0.2"
+ratatui = "0.30"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "io-util", "time", "sync", "fs"] }
