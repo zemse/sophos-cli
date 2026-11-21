@@ -13,15 +13,27 @@ const MAX_FRAME: u64 = 8192;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
-    Requirements,
+    // Empty struct variants, not unit variants: serde ignores unknown fields on
+    // unit variants of an internally tagged enum.
+    Requirements {},
     Connect {
         username: Option<String>,
         password: Option<Secret>,
+        otp: Option<Secret>,
     },
-    Status,
-    Reconnect,
-    Disconnect,
-    Stop,
+    /// One-time code for the next login, for configs without a TOTP source.
+    Otp {
+        otp: Secret,
+    },
+    Status {},
+    Reconnect {},
+    Disconnect {},
+    Stop {},
+}
+
+/// A one-time code as typed by the user: 6 to 10 ASCII digits.
+pub fn valid_otp(code: &str) -> bool {
+    (6..=10).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -40,6 +52,9 @@ pub struct Reply {
     pub status: Status,
     pub need_username: bool,
     pub need_password: bool,
+    /// The daemon has no TOTP source, so connecting needs a one-time code.
+    #[serde(default)]
+    pub need_otp: bool,
     pub error: Option<String>,
 }
 
@@ -99,5 +114,14 @@ mod tests {
             "{\"command\":\"status\",\"password\":\"public-test\"}"
         )
         .is_err());
+        assert!(serde_json::from_str::<Request>("{\"command\":\"status\"}").is_ok());
+    }
+
+    #[test]
+    fn otp_codes_are_short_digit_strings() {
+        assert!(valid_otp("123456") && valid_otp("12345678"));
+        for code in ["", "12345", "12345a", "123 456", "12345678901"] {
+            assert!(!valid_otp(code));
+        }
     }
 }

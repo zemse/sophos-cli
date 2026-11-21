@@ -1,6 +1,6 @@
 [package]
 name = "sophos-cli"
-description = "Sophos SSL VPN daemon with local CLI control and TOTP reconnect"
+description = "Sophos SSL VPN daemon with local CLI control, machine-bound TOTP and on-demand OTP"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,11 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 ghvpn-mgmt = { path = "../ghvpn-mgmt", version = "0.1.0" }
+authn-cli = { path = "../authn-cli" }
+totp-core.workspace = true
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.29"
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies"] }
 ring = "0.17.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

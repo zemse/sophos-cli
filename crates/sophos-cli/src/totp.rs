@@ -1,14 +1,24 @@
-//! RFC 6238 TOTP (SHA1, six digits, 30-second steps).
+//! RFC 6238 TOTP. A plain `totp_seed` uses SHA1, six digits and 30-second
+//! steps; an envelope carries its own parameters.
 
 use anyhow::{bail, Context};
-use ring::hmac;
+use totp_core::TotpParams;
 use zeroize::Zeroizing;
 
 pub struct Totp {
     seed: Zeroizing<Vec<u8>>,
+    params: TotpParams,
 }
 
 impl Totp {
+    pub fn from_seed(seed: Zeroizing<Vec<u8>>, params: TotpParams) -> Self {
+        Self { seed, params }
+    }
+
+    pub fn step(&self) -> u64 {
+        u64::from(self.params.step.max(1))
+    }
+
     pub fn new(base32: &str) -> anyhow::Result<Self> {
         let mut seed = Zeroizing::new(Vec::new());
         let mut bits = 0u32;
@@ -49,23 +59,29 @@ impl Totp {
         if seed.len() < 10 {
             bail!("TOTP seed must contain at least 80 bits");
         }
-        Ok(Self { seed })
+        Ok(Self {
+            seed,
+            params: TotpParams::default(),
+        })
     }
 
     pub fn code(&self, counter: u64) -> Zeroizing<String> {
-        let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &self.seed);
-        let tag = hmac::sign(&key, &counter.to_be_bytes());
-        let bytes = tag.as_ref();
-        let offset = (bytes[19] & 15) as usize;
-        let number = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) & 0x7fffffff;
-        Zeroizing::new(format!("{:06}", number % 1_000_000))
+        Zeroizing::new(totp_core::hotp(
+            &self.seed,
+            counter,
+            self.params.digits,
+            self.params.algo,
+        ))
     }
 }
 
 /// Returns a usable counter, avoiding code reuse and the last three seconds of a step.
-pub fn usable_counter(unix_seconds: u64, last: Option<u64>) -> Option<u64> {
-    let counter = unix_seconds / 30;
-    (unix_seconds % 30 < 27 && last.is_none_or(|last| counter > last)).then_some(counter)
+pub fn usable_counter(unix_seconds: u64, step: u64, last: Option<u64>) -> Option<u64> {
+    let step = step.max(1);
+    let counter = unix_seconds / step;
+    let margin = 3.min(step / 2);
+    (unix_seconds % step < step - margin && last.is_none_or(|last| counter > last))
+        .then_some(counter)
 }
 
 pub fn unix_seconds() -> anyhow::Result<u64> {
@@ -112,9 +128,11 @@ mod tests {
 
     #[test]
     fn avoids_reuse_expiring_codes_and_clock_rollback() {
-        assert_eq!(usable_counter(60, Some(1)), Some(2));
-        assert_eq!(usable_counter(60, Some(2)), None);
-        assert_eq!(usable_counter(87, Some(1)), None);
-        assert_eq!(usable_counter(30, Some(2)), None);
+        assert_eq!(usable_counter(60, 30, Some(1)), Some(2));
+        assert_eq!(usable_counter(60, 30, Some(2)), None);
+        assert_eq!(usable_counter(87, 30, Some(1)), None);
+        assert_eq!(usable_counter(30, 30, Some(2)), None);
+        assert_eq!(usable_counter(119, 60, None), None);
+        assert_eq!(usable_counter(120, 60, Some(1)), Some(2));
     }
 }

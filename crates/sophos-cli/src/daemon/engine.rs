@@ -1,7 +1,7 @@
 use super::{Control, Credentials};
-use crate::config::{read_private, Config, Secret};
+use crate::config::{load_envelope, read_private, read_private_bytes, Config, Secret};
 use crate::ipc::Status;
-use crate::ovpn::{self, PatchOpts, RouteMode};
+use crate::ovpn::{self, validate_profile, PatchOpts, RouteMode};
 use crate::totp::{self, Totp};
 use anyhow::{bail, Context};
 use ghvpn_mgmt::{Line, Notification};
@@ -23,14 +23,34 @@ use zeroize::Zeroizing;
 
 const AUTH_WINDOW: Duration = Duration::from_secs(15 * 60);
 const MAX_AUTH_FAILURES: usize = 3;
+/// How long a code from `sophos otp` stays usable; TOTP codes rotate every 30 seconds.
+const OTP_TTL: Duration = Duration::from_secs(60);
+/// Pause between envelope unwrap attempts after a backend failure.
+const UNWRAP_RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Policy {
     attempts: u32,
     failures: VecDeque<Instant>,
     last_counter: Option<u64>,
+    manual_otp: Option<(Secret, Instant)>,
 }
 impl Policy {
+    fn set_otp(&mut self, code: Secret) {
+        self.manual_otp = Some((code, Instant::now()));
+    }
+    fn has_otp(&self) -> bool {
+        self.manual_otp
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() < OTP_TTL)
+    }
+    fn take_otp(&mut self) -> Option<Secret> {
+        let fresh = self.has_otp();
+        self.manual_otp
+            .take()
+            .filter(|_| fresh)
+            .map(|(code, _)| code)
+    }
     fn prune(&mut self, now: Instant) {
         self.failures
             .retain(|at| now.duration_since(*at) < AUTH_WINDOW);
@@ -79,99 +99,60 @@ fn write_private(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_profile(text: &str) -> anyhow::Result<()> {
-    let mut block = None;
-    let mut identity = false;
-    for line in text.lines().map(str::trim) {
-        if let Some(tag) = &block {
-            if line == format!("</{tag}>") {
-                block = None;
+/// Where login codes come from.
+enum Source {
+    Seed(Totp),
+    /// Unwrapped on every login, so the seed is only in memory while a code is made.
+    Envelope {
+        path: PathBuf,
+        step: u64,
+    },
+    Manual,
+}
+
+impl Source {
+    fn new(config: &Config, operator: u32) -> anyhow::Result<Self> {
+        Ok(match (&config.totp_seed, &config.totp_envelope) {
+            (Some(seed), _) => Source::Seed(Totp::new(seed.expose())?),
+            (None, Some(path)) => Source::Envelope {
+                path: path.clone(),
+                step: u64::from(load_envelope(path, operator)?.params.step.max(1)),
+            },
+            (None, None) => Source::Manual,
+        })
+    }
+
+    fn step(&self) -> u64 {
+        match self {
+            Source::Seed(totp) => totp.step(),
+            Source::Envelope { step, .. } => *step,
+            Source::Manual => 30,
+        }
+    }
+
+    async fn code(&self, counter: u64, operator: u32) -> anyhow::Result<Zeroizing<String>> {
+        match self {
+            Source::Seed(totp) => Ok(totp.code(counter)),
+            Source::Manual => bail!("no TOTP source configured"),
+            Source::Envelope { path, .. } => {
+                let path = path.clone();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                // Backends block (subprocesses, FFI, the AWS SDK's own runtime), so keep them off tokio.
+                std::thread::spawn(move || {
+                    let result = (|| -> anyhow::Result<Totp> {
+                        let bytes = read_private_bytes(&path, operator, 65536)?;
+                        let envelope = totp_core::Envelope::decode(&bytes)?;
+                        let seed = authn_cli::unwrap_seed(&envelope)
+                            .map_err(|e| anyhow::anyhow!("unwrapping TOTP seed: {e}"))?;
+                        Ok(Totp::from_seed(seed, envelope.params))
+                    })();
+                    let _ = tx.send(result);
+                });
+                let totp = rx.await.context("TOTP backend thread failed")??;
+                Ok(totp.code(counter))
             }
-            continue;
-        }
-        if line.is_empty() || line.starts_with(['#', ';']) {
-            continue;
-        }
-        if let Some(tag) = line.strip_prefix('<').and_then(|l| l.strip_suffix('>')) {
-            if !["ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2"].contains(&tag) {
-                bail!("unsupported inline block in VPN profile");
-            }
-            block = Some(tag.to_owned());
-            continue;
-        }
-        let directive = line.split_whitespace().next().unwrap_or_default();
-        if ![
-            "client",
-            "dev",
-            "dev-type",
-            "proto",
-            "remote",
-            "remote-random",
-            "remote-random-hostname",
-            "resolv-retry",
-            "nobind",
-            "persist-key",
-            "persist-tun",
-            "cipher",
-            "data-ciphers",
-            "data-ciphers-fallback",
-            "auth",
-            "auth-user-pass",
-            "auth-retry",
-            "auth-nocache",
-            "remote-cert-tls",
-            "verify-x509-name",
-            "tls-version-min",
-            "tls-version-max",
-            "tls-cipher",
-            "tls-ciphersuites",
-            "key-direction",
-            "reneg-sec",
-            "compress",
-            "comp-lzo",
-            "allow-compression",
-            "redirect-gateway",
-            "route-nopull",
-            "route",
-            "route-delay",
-            "route-method",
-            "route-metric",
-            "ca",
-            "cert",
-            "key",
-            "tls-auth",
-            "tls-crypt",
-            "tls-crypt-v2",
-            "verb",
-            "mute",
-            "tls-client",
-            "tls-timeout",
-            "float",
-            "explicit-exit-notify",
-            "sndbuf",
-            "rcvbuf",
-            "ping",
-            "ping-restart",
-            "keepalive",
-            "connect-retry",
-            "connect-timeout",
-            "inactive",
-        ]
-        .contains(&directive)
-        {
-            bail!("unsupported VPN profile directive; scripts, plugins and extra config are not allowed");
-        }
-        if directive == "verify-x509-name" || line == "remote-cert-tls server" {
-            identity = true;
         }
     }
-    if block.is_some() {
-        bail!("unterminated VPN profile block");
-    }
-    if !identity {
-        bail!("VPN profile must verify the server identity");
-    }
-    Ok(())
 }
 
 struct Session {
@@ -280,7 +261,8 @@ impl Session {
     async fn drive(
         &mut self,
         credentials: &Credentials,
-        totp: &Totp,
+        source: &Source,
+        operator: u32,
         policy: &mut Policy,
         rx: &mut mpsc::Receiver<Control>,
         status: &watch::Sender<Status>,
@@ -289,11 +271,15 @@ impl Session {
         let mut held_until = None;
         let mut started = false;
         let mut connected_at = None;
+        let mut unwrap_failed: Option<Instant> = None;
         let startup_deadline = Instant::now() + Duration::from_secs(10);
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         loop {
             tokio::select! {
-                command = rx.recv() => return Ok(End::Command(command.unwrap_or(Control::Stop))),
+                command = rx.recv() => match command {
+                    Some(Control::Otp(code)) => policy.set_otp(code),
+                    command => return Ok(End::Command(command.unwrap_or(Control::Stop))),
+                },
                 line = self.lines.next_line() => {
                     let Some(line) = line? else { return Ok(End::Retry); };
                     match ghvpn_mgmt::parse_line(&line) {
@@ -337,14 +323,29 @@ impl Session {
                         held_until = None;
                     }
                     if pending_auth {
-                        if let Some(counter) = totp::usable_counter(totp::unix_seconds()?, policy.last_counter) {
-                            let code = totp.code(counter);
+                        let code = if let Some(code) = policy.take_otp() {
+                            Some(Zeroizing::new(code.expose().to_owned()))
+                        } else if matches!(source, Source::Manual) || unwrap_failed.is_some_and(|at| at.elapsed() < UNWRAP_RETRY) {
+                            status.send_modify(|s| if s.state != "needs_otp" { s.state = "needs_otp".into(); });
+                            None
+                        } else if let Some(counter) = totp::usable_counter(totp::unix_seconds()?, source.step(), policy.last_counter) {
+                            match source.code(counter, operator).await {
+                                Ok(code) => { policy.last_counter = Some(counter); Some(code) }
+                                Err(error) => {
+                                    unwrap_failed = Some(Instant::now());
+                                    status.send_modify(|s| { s.state = "needs_otp".into(); s.last_error = Some(format!("{error:#}; supply a code with `sophos otp`")); });
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(code) = code {
                             let password = Zeroizing::new(format!("{}{}", credentials.password.expose(), code.as_str()));
                             let username_command = ghvpn_mgmt::username_cmd(&credentials.username)?;
                             let password_command = Zeroizing::new(ghvpn_mgmt::password_cmd(&password)?);
                             let commands = Zeroizing::new(format!("{username_command}\n{}\n", password_command.as_str()));
                             self.writer.write_all(commands.as_bytes()).await?;
-                            policy.last_counter = Some(counter);
                             pending_auth = false;
                             status.send_modify(|s| s.state = "authenticating".into());
                         }
@@ -378,13 +379,21 @@ fn apply(
 ) -> bool {
     match command {
         Control::Stop => return false,
+        Control::Otp(code) => {
+            policy.set_otp(code);
+            return true;
+        }
         Control::Disconnect => {
             *desired = false;
             *credentials = None;
+            policy.manual_otp = None;
         }
-        Control::Connect(value) => {
+        Control::Connect(value, otp) => {
             *credentials = Some(value);
             *desired = true;
+            if let Some(code) = otp {
+                policy.set_otp(code);
+            }
         }
         Control::Reconnect => *desired = credentials.is_some(),
     }
@@ -418,7 +427,7 @@ pub(super) async fn run(
     mut rx: mpsc::Receiver<Control>,
     status: watch::Sender<Status>,
 ) -> anyhow::Result<()> {
-    let totp = Totp::new(config.totp_seed.expose())?;
+    let source = Source::new(&config, operator)?;
     let mut credentials = match (&config.username, &config.password) {
         (Some(username), Some(password))
             if !username.is_empty() && !password.expose().is_empty() =>
@@ -448,6 +457,27 @@ pub(super) async fn run(
             }
             continue;
         }
+        if matches!(source, Source::Manual) && !policy.has_otp() {
+            // Starting OpenVPN now would only time out at its credential prompt.
+            status.send_modify(|s| {
+                s.state = "needs_otp".into();
+                s.tunnel_ip = None;
+                s.connected_since = None;
+            });
+            let Some(command) = rx.recv().await else {
+                break;
+            };
+            if !apply(
+                command,
+                &mut credentials,
+                &mut desired,
+                &mut policy,
+                &status,
+            ) {
+                break;
+            }
+            continue;
+        }
         status.send_modify(|s| {
             s.state = "connecting".into();
             s.tunnel_ip = None;
@@ -458,7 +488,7 @@ pub(super) async fn run(
             session = Session::start(&config, operator) => {
                 match session {
                     Ok(mut session) => {
-                        let result = session.drive(credentials.as_ref().context("credentials missing")?, &totp, &mut policy, &mut rx, &status).await;
+                        let result = session.drive(credentials.as_ref().context("credentials missing")?, &source, operator, &mut policy, &mut rx, &status).await;
                         session.stop().await;
                         result
                     }
@@ -581,14 +611,14 @@ mod tests {
             username: "public-test".into(),
             password: Secret::new("public-test".into()),
         };
-        let totp = Totp::new("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap();
+        let source = Source::Seed(Totp::new("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ").unwrap());
         let mut policy = Policy {
             last_counter: Some(u64::MAX),
             ..Policy::default()
         };
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            session.drive(&credentials, &totp, &mut policy, &mut rx, &status),
+            session.drive(&credentials, &source, 0, &mut policy, &mut rx, &status),
         )
         .await;
         session.child.kill().await.unwrap();
@@ -596,6 +626,108 @@ mod tests {
         assert_eq!(status.borrow().auth_failures, 3);
         assert_eq!(status.borrow().reconnects, 1);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_source_waits_for_supplied_code_and_uses_it_once() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (reader, writer) = client.into_split();
+        let child = Command::new("/bin/sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut session = Session {
+            child,
+            lines: BufReader::new(reader).lines(),
+            writer,
+            _dir: RunDir::new().unwrap(),
+        };
+        let (tx, mut rx) = mpsc::channel(2);
+        let (status, mut observed) = watch::channel(Status::default());
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = server.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            writer
+                .write_all(b">HOLD:Waiting for hold release:0\n")
+                .await
+                .unwrap();
+            for expected in ["state on", "bytecount 2", "hold release"] {
+                assert_eq!(lines.next_line().await.unwrap().as_deref(), Some(expected));
+            }
+            writer
+                .write_all(b">PASSWORD:Need 'Auth' username/password\n")
+                .await
+                .unwrap();
+            observed.wait_for(|s| s.state == "needs_otp").await.unwrap();
+            tx.send(Control::Otp(Secret::new("123456".into())))
+                .await
+                .unwrap();
+            let username = lines.next_line().await.unwrap().unwrap();
+            let password = lines.next_line().await.unwrap().unwrap();
+            assert!(username.contains("public-test"));
+            assert!(password.contains("public-test-pw123456"));
+            tx.send(Control::Stop).await.unwrap();
+        });
+        let credentials = Credentials {
+            username: "public-test".into(),
+            password: Secret::new("public-test-pw".into()),
+        };
+        let mut policy = Policy::default();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            session.drive(
+                &credentials,
+                &Source::Manual,
+                0,
+                &mut policy,
+                &mut rx,
+                &status,
+            ),
+        )
+        .await;
+        session.child.kill().await.unwrap();
+        server.await.unwrap();
+        assert!(matches!(
+            result.unwrap().unwrap(),
+            End::Command(Control::Stop)
+        ));
+        assert!(!policy.has_otp());
+    }
+
+    #[tokio::test]
+    async fn envelope_source_unwraps_on_each_code() {
+        let dir = RunDir::new().unwrap();
+        let path = dir.0.join("totp.envelope");
+        // RFC 6238 SHA1 seed in the unencrypted `plain` backend.
+        let envelope = totp_core::Envelope::new(
+            "plain",
+            totp_core::TotpParams::default(),
+            b"12345678901234567890".to_vec(),
+        );
+        write_private(&path, "").unwrap();
+        fs::write(&path, envelope.encode().unwrap()).unwrap();
+        let source = Source::Envelope { path, step: 30 };
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(source.code(59 / 30, uid).await.unwrap().as_str(), "287082");
+        assert_eq!(
+            source.code(1111111109 / 30, uid).await.unwrap().as_str(),
+            "081804"
+        );
+    }
+
+    #[test]
+    fn supplied_codes_expire() {
+        let mut policy = Policy::default();
+        policy.manual_otp = Some((
+            Secret::new("123456".into()),
+            Instant::now() - OTP_TTL - Duration::from_secs(1),
+        ));
+        assert!(!policy.has_otp());
+        assert!(policy.take_otp().is_none());
+        policy.set_otp(Secret::new("654321".into()));
+        assert_eq!(policy.take_otp().unwrap().expose(), "654321");
+        assert!(policy.take_otp().is_none());
     }
 
     #[test]

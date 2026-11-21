@@ -2,12 +2,11 @@
 //! whether a GitHub repository is reachable through it.
 
 mod app;
-mod portal;
 mod probe;
 mod ui;
 mod vpn;
 
-use sophos_cli::{ovpn, routes};
+use sophos_cli::{ovpn, portal, routes};
 
 use anyhow::Context;
 use clap::Parser;
@@ -25,7 +24,7 @@ pub const USER_AGENT: &str = concat!("ghvpn-tui/", env!("CARGO_PKG_VERSION"));
 #[command(version, about)]
 pub struct Args {
     /// Sophos firewall address. Replaces the `remote` host from the .ovpn.
-    #[arg(long, env = "GHVPN_GATEWAY", default_value = "203.0.113.10")]
+    #[arg(long, env = "GHVPN_GATEWAY")]
     pub gateway: String,
     /// Hostname on the portal's TLS certificate (for example vpn.example.com). Requests still
     /// go to --gateway; without it the portal certificate is not verified.

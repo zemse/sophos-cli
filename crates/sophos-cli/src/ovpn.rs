@@ -1,6 +1,7 @@
 //! Rewrites a Sophos `.ovpn` so credentials only flow through the management interface
 //! and routing follows the selected [`RouteMode`].
 
+use anyhow::bail;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
@@ -207,6 +208,102 @@ pub fn patch(input: &str, opts: &PatchOpts) -> anyhow::Result<(String, OvpnInfo)
         }
     }
     Ok((out, info))
+}
+
+/// Accept only plain client directives, so a profile cannot run scripts or plugins as root.
+pub fn validate_profile(text: &str) -> anyhow::Result<()> {
+    let mut block = None;
+    let mut identity = false;
+    for line in text.lines().map(str::trim) {
+        if let Some(tag) = &block {
+            if line == format!("</{tag}>") {
+                block = None;
+            }
+            continue;
+        }
+        if line.is_empty() || line.starts_with(['#', ';']) {
+            continue;
+        }
+        if let Some(tag) = line.strip_prefix('<').and_then(|l| l.strip_suffix('>')) {
+            if !["ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2"].contains(&tag) {
+                bail!("unsupported inline block in VPN profile");
+            }
+            block = Some(tag.to_owned());
+            continue;
+        }
+        let directive = line.split_whitespace().next().unwrap_or_default();
+        if ![
+            "client",
+            "dev",
+            "dev-type",
+            "proto",
+            "remote",
+            "remote-random",
+            "remote-random-hostname",
+            "resolv-retry",
+            "nobind",
+            "persist-key",
+            "persist-tun",
+            "cipher",
+            "data-ciphers",
+            "data-ciphers-fallback",
+            "auth",
+            "auth-user-pass",
+            "auth-retry",
+            "auth-nocache",
+            "remote-cert-tls",
+            "verify-x509-name",
+            "tls-version-min",
+            "tls-version-max",
+            "tls-cipher",
+            "tls-ciphersuites",
+            "key-direction",
+            "reneg-sec",
+            "compress",
+            "comp-lzo",
+            "allow-compression",
+            "redirect-gateway",
+            "route-nopull",
+            "route",
+            "route-delay",
+            "route-method",
+            "route-metric",
+            "ca",
+            "cert",
+            "key",
+            "tls-auth",
+            "tls-crypt",
+            "tls-crypt-v2",
+            "verb",
+            "mute",
+            "tls-client",
+            "tls-timeout",
+            "float",
+            "explicit-exit-notify",
+            "sndbuf",
+            "rcvbuf",
+            "ping",
+            "ping-restart",
+            "keepalive",
+            "connect-retry",
+            "connect-timeout",
+            "inactive",
+        ]
+        .contains(&directive)
+        {
+            bail!("unsupported VPN profile directive; scripts, plugins and extra config are not allowed");
+        }
+        if directive == "verify-x509-name" || line == "remote-cert-tls server" {
+            identity = true;
+        }
+    }
+    if block.is_some() {
+        bail!("unterminated VPN profile block");
+    }
+    if !identity {
+        bail!("VPN profile must verify the server identity");
+    }
+    Ok(())
 }
 
 pub fn prefix_to_mask(prefix: u8) -> Ipv4Addr {

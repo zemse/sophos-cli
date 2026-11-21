@@ -3137,6 +3137,7 @@ name = "sophos-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "authn-cli",
  "clap",
  "crossterm",
  "ghvpn-mgmt",
@@ -3146,6 +3147,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "totp-core",
  "zeroize",
 ]
 

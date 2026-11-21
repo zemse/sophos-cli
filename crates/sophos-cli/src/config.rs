@@ -38,7 +38,10 @@ impl Serialize for Secret {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub profile: PathBuf,
-    pub totp_seed: Secret,
+    /// Plaintext Base32 seed. Prefer `totp_envelope`.
+    pub totp_seed: Option<Secret>,
+    /// Envelope written by `sophos totp import`, unwrapped by its backend on each login.
+    pub totp_envelope: Option<PathBuf>,
     pub username: Option<String>,
     pub password: Option<Secret>,
     pub gateway: Option<String>,
@@ -69,6 +72,18 @@ pub fn default_config() -> anyhow::Result<PathBuf> {
     Ok(base.join("sophos-cli/config.json"))
 }
 
+/// Root-owned config used by the boot service templates.
+pub fn system_config() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        "/Library/Application Support/sophos-cli/config.json".into()
+    } else {
+        "/etc/sophos-cli/config.json".into()
+    }
+}
+
+/// Control socket of the boot service; written into its config by `sophos setup --system`.
+pub const SYSTEM_SOCKET: &str = "/var/run/sophos-cli/control.sock";
+
 pub fn default_socket(config: &Path) -> anyhow::Result<PathBuf> {
     Ok(config
         .parent()
@@ -77,6 +92,19 @@ pub fn default_socket(config: &Path) -> anyhow::Result<PathBuf> {
 }
 
 pub fn read_private(path: &Path, owner: u32, limit: u64) -> anyhow::Result<Zeroizing<String>> {
+    let bytes = read_private_bytes(path, owner, limit)?;
+    Ok(Zeroizing::new(
+        std::str::from_utf8(&bytes)
+            .context("private file is not UTF-8")?
+            .to_owned(),
+    ))
+}
+
+pub fn read_private_bytes(
+    path: &Path,
+    owner: u32,
+    limit: u64,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -89,8 +117,8 @@ pub fn read_private(path: &Path, owner: u32, limit: u64) -> anyhow::Result<Zeroi
     {
         bail!("private file must be regular, mode 0600 and owned by its operator or root");
     }
-    let mut content = Zeroizing::new(String::new());
-    file.take(limit + 1).read_to_string(&mut content)?;
+    let mut content = Zeroizing::new(Vec::new());
+    file.take(limit + 1).read_to_end(&mut content)?;
     if content.len() as u64 > limit {
         bail!("private file is too large");
     }
@@ -141,9 +169,39 @@ impl Config {
         if crate::ovpn::RouteMode::parse(&config.route_mode).is_none() {
             bail!("route_mode must be github, full or pushed");
         }
-        crate::totp::Totp::new(config.totp_seed.expose())?;
+        match (&config.totp_seed, &config.totp_envelope) {
+            (Some(_), Some(_)) => bail!("set totp_seed or totp_envelope, not both"),
+            (Some(seed), None) => {
+                crate::totp::Totp::new(seed.expose())?;
+            }
+            (None, Some(path)) => {
+                if !path.is_absolute() {
+                    bail!("totp_envelope path must be absolute");
+                }
+                load_envelope(path, meta.uid())?;
+            }
+            (None, None) => {}
+        }
         Ok((config, operator))
     }
+
+    /// No automatic TOTP source: every login waits for a code from `sophos connect` or `sophos otp`.
+    pub fn manual_otp(&self) -> bool {
+        self.totp_seed.is_none() && self.totp_envelope.is_none()
+    }
+}
+
+/// Read and decode an envelope without unwrapping its seed.
+pub fn load_envelope(path: &Path, owner: u32) -> anyhow::Result<totp_core::Envelope> {
+    let bytes = read_private_bytes(path, owner, 65536)?;
+    let envelope = totp_core::Envelope::decode(&bytes).context("invalid TOTP envelope")?;
+    if authn_cli::build_provider(&envelope.provider_id, "", authn_cli::DEFAULT_ALLOW).is_none() {
+        bail!(
+            "TOTP envelope names backend `{}`, which this build lacks",
+            envelope.provider_id
+        );
+    }
+    Ok(envelope)
 }
 
 #[cfg(test)]

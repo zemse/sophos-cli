@@ -3,7 +3,7 @@
 mod engine;
 
 use crate::config::{Config, Secret};
-use crate::ipc::{read_frame, Reply, Request, Status};
+use crate::ipc::{read_frame, valid_otp, Reply, Request, Status};
 use anyhow::{bail, Context};
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -21,7 +21,9 @@ pub(super) struct Credentials {
 }
 
 pub(super) enum Control {
-    Connect(Credentials),
+    /// Credentials, plus a one-time code when the config has no TOTP source.
+    Connect(Credentials, Option<Secret>),
+    Otp(Secret),
     Reconnect,
     Disconnect,
     Stop,
@@ -118,11 +120,25 @@ async fn serve(
             .password
             .as_ref()
             .is_none_or(|s| s.expose().is_empty()),
+        need_otp: config.manual_otp(),
         error: None,
     };
     let control = match request {
-        Request::Requirements | Request::Status => None,
-        Request::Connect { username, password } => {
+        Request::Requirements {} | Request::Status {} => None,
+        Request::Otp { otp } => {
+            if valid_otp(otp.expose()) {
+                Some(Control::Otp(otp))
+            } else {
+                reply.ok = false;
+                reply.error = Some("one-time code must be 6 to 10 digits".into());
+                None
+            }
+        }
+        Request::Connect {
+            username,
+            password,
+            otp,
+        } => {
             let username = username.or_else(|| config.username.clone());
             let password = password.or_else(|| config.password.as_ref().map(Secret::duplicate));
             match (username, password) {
@@ -136,8 +152,12 @@ async fn serve(
                         reply.error =
                             Some("credentials contain unsupported control characters".into());
                         None
+                    } else if otp.as_ref().is_some_and(|c| !valid_otp(c.expose())) {
+                        reply.ok = false;
+                        reply.error = Some("one-time code must be 6 to 10 digits".into());
+                        None
                     } else {
-                        Some(Control::Connect(Credentials { username, password }))
+                        Some(Control::Connect(Credentials { username, password }, otp))
                     }
                 }
                 _ => {
@@ -147,9 +167,9 @@ async fn serve(
                 }
             }
         }
-        Request::Reconnect => Some(Control::Reconnect),
-        Request::Disconnect => Some(Control::Disconnect),
-        Request::Stop => Some(Control::Stop),
+        Request::Reconnect {} => Some(Control::Reconnect),
+        Request::Disconnect {} => Some(Control::Disconnect),
+        Request::Stop {} => Some(Control::Stop),
     };
     if let Some(control) = control {
         tx.send(control).await.context("supervisor stopped")?;
@@ -238,21 +258,23 @@ mod tests {
                 Request::Connect {
                     username: Some("public-test-user".into()),
                     password: Some(Secret::new("public-test-password".into())),
+                    otp: Some(Secret::new("123456".into())),
                 }
             } else {
-                Request::Requirements
+                Request::Requirements {}
             };
             let mut bytes = zeroize::Zeroizing::new(serde_json::to_vec(&request).unwrap());
             bytes.push(b'\n');
             client.write_all(&bytes).await.unwrap();
             let frame = read_frame(&mut client).await.unwrap();
             let reply: Reply = serde_json::from_slice(&frame).unwrap();
-            assert!(reply.ok && reply.need_username && reply.need_password);
+            assert!(reply.ok && reply.need_username && reply.need_password && !reply.need_otp);
             task.await.unwrap().unwrap();
             if connect {
-                let Some(Control::Connect(credentials)) = rx.recv().await else {
+                let Some(Control::Connect(credentials, otp)) = rx.recv().await else {
                     panic!("connect command missing");
                 };
+                assert_eq!(otp.unwrap().expose(), "123456");
                 assert_eq!(credentials.username, "public-test-user");
                 assert_eq!(credentials.password.expose(), "public-test-password");
             }
